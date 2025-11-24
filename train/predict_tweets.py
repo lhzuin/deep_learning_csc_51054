@@ -15,7 +15,7 @@ from data import load_dataset, make_loader
 OmegaConf.register_new_resolver("if", lambda cond, a, b: a if cond else b)
 
 
-@hydra.main(config_path="../configs", config_name="train_tweets", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="train_v8_camembert2", version_base="1.1")
 def predict(cfg):
     device = (
         torch.device("cuda") if torch.cuda.is_available()
@@ -24,7 +24,7 @@ def predict(cfg):
     )
     print(f"Using device: {device}")
 
-    ckpt_path = Path(cfg.checkpoint_path)
+    ckpt_path = Path(cfg.checkpoint_load_path)
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 

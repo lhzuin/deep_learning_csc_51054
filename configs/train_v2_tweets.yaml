@@ -4,8 +4,8 @@ epochs_stage1: 3
 epochs_stage2: 6
 use_warmup: true
 warmup_fraction: 0.1
-checkpoint_path: "influencer_lora.pt"
-#checkpoint_path: "/Users/luiszuin/Desktop/Polytechnique/3AP1/DeepLearning/Kaggle2025/checkpoints/influencer_lora.pt"
+#checkpoint_path: "influencer_lora.pt"
+checkpoint_path: "/Users/luiszuin/Desktop/Polytechnique/3AP1/DeepLearning/Kaggle2025/checkpoints/influencer_lora.pt"
 predict_path: ${hydra:runtime.cwd}/kaggle_test.jsonl
 output_csv: ${hydra:runtime.cwd}/submission.csv
 
