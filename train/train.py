@@ -40,7 +40,7 @@ def param_groups_for(model, lr_class, lr_lora, cfg):
     lora_params = [p for n,p in model.named_parameters() if p.requires_grad and "lora_" in n]
     head_params = [p for n,p in model.named_parameters() if p.requires_grad and "lora_" not in n]
     return [
-        {"params": head_params, "lr": lr_class, "weight_decay": cfg.weight_decay},
+        {"params": head_params, "lr": lr_class, "weight_decay": cfg.optim.weight_decay},
         {"params": lora_params, "lr": lr_lora,  "weight_decay": 0.0},
     ]
 
@@ -87,7 +87,26 @@ def run_epoch(stage_name, train_loader, model, loss_fn, optimizer, scheduler, sc
 
     return total_loss / total_n
 
-@hydra.main(config_path="../configs", config_name="train_v8_camembert2", version_base="1.1")
+def run_validation(val_loader, model, loss_fn, device):
+    model.eval()
+    val_loss, val_n = 0.0, 0
+    correct, total = 0, 0
+    with torch.no_grad():
+        for batch in val_loader:
+            batch["label"] = batch["label"].to(device)
+            logp = model(batch)
+            loss = loss_fn(logp, batch["label"])
+            val_loss += loss.detach().cpu().item() * len(batch["label"])
+            val_n    += len(batch["label"])
+
+            preds = logp.argmax(dim=1)
+            correct += (preds == batch["label"]).sum().item()
+            total   += len(batch["label"])
+    val_loss /= max(1, val_n)
+    val_acc = correct / max(1, total)
+    return val_loss, val_acc
+
+@hydra.main(config_path="../configs", config_name="train_v9_camembert2", version_base="1.1")
 def train(cfg):
     set_seed(cfg.seed)
     logger = wandb.init(project="challenge_CSC_43M04_EP", name=cfg.experiment_name) if cfg.log else None
@@ -143,29 +162,24 @@ def train(cfg):
     
 
 
-    best_val, patience, epochs_no_improve = float("inf"), cfg.early_stopping.patience, 0
+    best_val_loss, best_val_acc, patience, epochs_no_improve = float("inf"), 0, cfg.early_stopping.patience, 0
     for epoch in range(cfg.epochs_stage1):
         train_loss = run_epoch("stage1", train_loader, model, loss_fn, optimizer, scheduler_stage1, scaler, logger, device)
         if logger: wandb.log({"epoch": epoch, "stage1/loss_epoch": train_loss})
 
-        # quick val
-        model.eval()
-        val_loss, val_n = 0.0, 0
-        with torch.no_grad():
-            for batch in val_loader:
-                batch["label"] = batch["label"].to(device)
-                logp = model(batch)
-                loss = loss_fn(logp, batch["label"])
-                val_loss += loss.detach().cpu().item() * len(batch["label"])
-                val_n    += len(batch["label"])
-        val_loss /= max(1, val_n)
-        if logger: wandb.log({"epoch": epoch, "stage1/val_loss_epoch": val_loss})
+        val_loss, val_acc = run_validation(val_loader, model, loss_fn, device)
+        
+        if logger: 
+            wandb.log({"epoch": epoch, "stage1/val_loss_epoch": val_loss})
+            wandb.log({"epoch": epoch, "stage1/val_acc_epoch": val_acc})
 
-        if val_loss < best_val:
-            best_val, epochs_no_improve = val_loss, 0
+        if val_loss < best_val_loss and val_acc > best_val_acc:
+            best_val_loss, best_val_acc, epochs_no_improve = val_loss, val_acc, 0
             torch.save(model.state_dict(), cfg.checkpoint_save_path)
-            print(f"[Stage1][Epoch {epoch}] best val {best_val:.4f} (saved)")
+            print(f"[Stage1][Epoch {epoch}] best val loss {best_val_loss:.4f}, best val acc {best_val_acc:.4f} (saved)")
+            
         else:
+            print(f"[Stage1] No improve in epoch {epoch}: val loss {val_loss:.4f}, val acc {val_acc:.4f}")
             epochs_no_improve += 1
             if epochs_no_improve >= patience and epoch >= cfg.early_stopping.min_epochs:
                 print("Early stopping Stage 1.")
@@ -185,28 +199,24 @@ def train(cfg):
     else:
         scheduler_stage2 = None
 
-    best_val, epochs_no_improve = float("inf"), 0
+    best_val_loss, best_val_acc, epochs_no_improve = float("inf"), 0, 0
     for epoch in range(cfg.epochs_stage2):
         train_loss = run_epoch("stage2", train_loader, model, loss_fn, optimizer, scheduler_stage2, scaler, logger, device)
         if logger: wandb.log({"epoch": epoch, "stage2/loss_epoch": train_loss})
 
-        model.eval()
-        val_loss, val_n = 0.0, 0
-        with torch.no_grad():
-            for batch in val_loader:
-                batch["label"] = batch["label"].to(device)
-                logp = model(batch)
-                loss = loss_fn(logp, batch["label"])
-                val_loss += loss.detach().cpu().item() * len(batch["label"])
-                val_n    += len(batch["label"])
-        val_loss /= max(1, val_n)
-        if logger: wandb.log({"epoch": epoch, "stage2/val_loss_epoch": val_loss})
+        val_loss, val_acc = run_validation(val_loader, model, loss_fn, device)
 
-        if val_loss < best_val:
-            best_val, epochs_no_improve = val_loss, 0
+        if logger: 
+            wandb.log({"epoch": epoch, "stage2/val_loss_epoch": val_loss})
+            wandb.log({"epoch": epoch, "stage2/val_acc_epoch": val_acc})
+            
+
+        if val_loss < best_val_loss and val_acc > best_val_acc:
+            best_val_loss, best_val_acc, epochs_no_improve = val_loss, val_acc, 0
             torch.save(model.state_dict(), cfg.checkpoint_save_path)
-            print(f"[Stage2][Epoch {epoch}] best val {best_val:.4f} (saved)")
+            print(f"[Stage2][Epoch {epoch}] best val loss {best_val_loss:.4f}, best val acc {best_val_acc:.4f} (saved)")
         else:
+            print(f"[Stage2]No improve in epoch {epoch}: val loss {val_loss:.4f}, val acc {val_acc:.4f}")
             epochs_no_improve += 1
             if epochs_no_improve >= patience and epoch >= cfg.early_stopping.min_epochs:
                 print("Early stopping Stage 2.")
