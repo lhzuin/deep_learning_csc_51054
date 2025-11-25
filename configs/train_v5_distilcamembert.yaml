@@ -1,0 +1,48 @@
+experiment_name: "train_distilcamembert_v5"
+log: true
+seed: 42
+
+epochs_stage1: 2
+epochs_stage2: 6
+use_warmup: true
+warmup_fraction_stage1: 0.02
+warmup_fraction_stage2: 0.05
+
+lr_scheduler_stage1: cosine
+lr_scheduler_stage2: cosine 
+
+checkpoint_save_path: "influencer_lora.pt"
+checkpoint_load_path: "/Users/luiszuin/Desktop/Polytechnique/3AP1/DeepLearning/Kaggle2025/checkpoints/influencer_lora.pt"
+predict_path: ${hydra:runtime.cwd}/kaggle_test.jsonl
+output_csv: ${hydra:runtime.cwd}/submission.csv
+
+early_stopping:
+  patience: 3
+  min_epochs: 3
+
+datamodule:
+  _target_: data.datamodule_tweets.TweetsDataModule
+  train_path: ${hydra:runtime.cwd}/train.jsonl
+  batch_size: 32
+  num_workers: 2
+
+model:
+  instance:
+    _target_: models.influencer_distilcamembert.InfluencerDistilCamembert
+    n_source_buckets: 999   # placeholder; we’ll override at runtime
+    source_emb_dim: 16
+    num_proj_dim: 16
+    head_hidden_dim: 256
+    head_dropout: 0.15
+    max_len_tweet: 128
+    max_len_desc: 96
+
+optim:
+  _target_: torch.optim.AdamW
+  lr_class: 3e-4   # head + projections
+  lr_lora:  6e-5   # LoRA adapters
+  lr: 2e-4         # base lr (unused directly; AdamW needs it)
+  weight_decay: 0.01
+
+loss_fn:
+  _target_: torch.nn.NLLLoss
