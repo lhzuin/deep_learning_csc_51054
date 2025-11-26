@@ -1,6 +1,6 @@
 import torch, torch.nn as nn
 from peft import get_peft_model, LoraConfig
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, CamembertTokenizer
 
 #TODO: add a temp head for the text only stage
 
@@ -22,7 +22,7 @@ class InfluencerDistilCamembert(nn.Module):
         base_model = "cmarkea/distilcamembert-base"
 
         # ---------- Tweet text encoder (+LoRA adaptors) ----------
-        self.tok = AutoTokenizer.from_pretrained(base_model, use_fast=True)
+        self.tok = CamembertTokenizer.from_pretrained(base_model) #AutoTokenizer.from_pretrained(base_model, use_fast=True)
         self.base_enc = AutoModel.from_pretrained(base_model)
         text_lora_cfg = LoraConfig(
             r=8, lora_alpha=16, target_modules=["query", "value"], lora_dropout=0.05,

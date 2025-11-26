@@ -106,7 +106,7 @@ def run_validation(val_loader, model, loss_fn, device):
     val_acc = correct / max(1, total)
     return val_loss, val_acc
 
-@hydra.main(config_path="../configs", config_name="train_v9_camembert2", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="train_v11_distilcamembert", version_base="1.1")
 def train(cfg):
     set_seed(cfg.seed)
     logger = wandb.init(project="challenge_CSC_43M04_EP", name=cfg.experiment_name) if cfg.log else None
@@ -173,7 +173,8 @@ def train(cfg):
             wandb.log({"epoch": epoch, "stage1/val_loss_epoch": val_loss})
             wandb.log({"epoch": epoch, "stage1/val_acc_epoch": val_acc})
 
-        if val_loss < best_val_loss and val_acc > best_val_acc:
+        improved = (val_acc > best_val_acc) or ((best_val_acc - val_acc < cfg.acc_epsilon) and (val_loss < best_val_loss))
+        if improved:
             best_val_loss, best_val_acc, epochs_no_improve = val_loss, val_acc, 0
             torch.save(model.state_dict(), cfg.checkpoint_save_path)
             print(f"[Stage1][Epoch {epoch}] best val loss {best_val_loss:.4f}, best val acc {best_val_acc:.4f} (saved)")
@@ -186,6 +187,9 @@ def train(cfg):
                 break
 
     # ------- Stage 2: full (LoRA + all shallow layers) -------
+    state_dict = torch.load(cfg.checkpoint_save_path, map_location=device)
+    model.load_state_dict(state_dict)
+    print("Loaded best Stage1 checkpoint before starting Stage2.")
     model.set_stage("full")
     optimizer = hydra.utils.instantiate(opt_cfg, params=param_groups_for(model, lr_class, lr_lora, cfg), _convert_="all")
     if cfg.use_warmup:
@@ -210,8 +214,8 @@ def train(cfg):
             wandb.log({"epoch": epoch, "stage2/val_loss_epoch": val_loss})
             wandb.log({"epoch": epoch, "stage2/val_acc_epoch": val_acc})
             
-
-        if val_loss < best_val_loss and val_acc > best_val_acc:
+        improved = (val_acc > best_val_acc) or ((best_val_acc - val_acc < cfg.acc_epsilon) and (val_loss < best_val_loss))
+        if improved:
             best_val_loss, best_val_acc, epochs_no_improve = val_loss, val_acc, 0
             torch.save(model.state_dict(), cfg.checkpoint_save_path)
             print(f"[Stage2][Epoch {epoch}] best val loss {best_val_loss:.4f}, best val acc {best_val_acc:.4f} (saved)")
