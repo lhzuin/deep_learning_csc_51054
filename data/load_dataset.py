@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import re, ast, json
 from pathlib import Path
+import hashlib
 
 def parse_tweets(path, expect_label=True):
     # Load & flatten
@@ -46,6 +47,17 @@ def parse_tweets(path, expect_label=True):
     # Media presence (avoid .get(...).apply on a scalar)
     df["has_media"] = df["extended_entities.media"].apply(lambda x: safe_len(x) > 0)
 
+    def make_user_key(row):
+        key = (
+            str(row.get("user.created_at", "")) + "|" +
+            str(row.get("user.description", "")) + "|" +
+            str(row.get("user.url", "")) + "|" +
+            str(row.get("user.location", ""))
+        )
+        return hashlib.md5(key.encode("utf-8")).hexdigest()
+
+    df["author_pseudo_id"] = df.apply(make_user_key, axis=1)
+
     # Source app (extract readable name from HTML anchor)
     def extract_source(x):
         if not isinstance(x, str):
@@ -67,6 +79,7 @@ def parse_tweets(path, expect_label=True):
     # Keep relevant columns (only those that exist)
     #"lang" -> always french
     keep_cols = [
+        "author_pseudo_id",
         "challenge_id",
         "id_str", "full_text", "source_app",
         "n_hashtags", "n_mentions", "has_media",

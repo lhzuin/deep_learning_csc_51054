@@ -2,6 +2,7 @@ experiment_name: "train_v12_distilcamembert"
 log: true
 seed: 42
 acc_epsilon: 1e-3
+val_type: "random"  # "random" or "author_based"
 
 epochs_stage1: 2
 epochs_stage2: 6
@@ -28,6 +29,8 @@ datamodule:
   train_path: ${hydra:runtime.cwd}/../train.jsonl
   batch_size: 32 # maybe reduce?
   num_workers: 2
+  val_size: 0.1
+  random_state: ${seed}
 
 model:
   instance:
