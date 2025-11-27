@@ -17,17 +17,23 @@ class TweetsDataModule:
         self.src2idx = None
 
     def setup(self, ckpt_path):
-        df, src2idx = load_dataset(self.train_path, expect_label=True)
+        df, src2idx, stats = load_dataset(self.train_path, expect_label=True)
         ckpt_path = Path(ckpt_path)
 
         map_path  = ckpt_path.with_suffix(".src2idx.json")
+        stats_path = ckpt_path.with_suffix(".stats.json")
 
         with map_path.open("w", encoding="utf-8") as f:
             json.dump(src2idx, f, ensure_ascii=False, indent=2)
-        # (Optional) split here
+
+        
+        with stats_path.open("w", encoding="utf-8") as f:
+            json.dump(stats, f, ensure_ascii=False, indent=2)
+
         from sklearn.model_selection import train_test_split
-        self.train_df, self.val_df = train_test_split(df, test_size=0.1, stratify=df["label"], random_state=42)
+        self.train_df, self.val_df = train_test_split(df, test_size=0.1, stratify=df["label"], random_state=42) #TODO: Import those from config
         self.src2idx = src2idx
+        self.stats = stats
 
     @property
     def n_source_buckets(self):

@@ -106,7 +106,7 @@ def run_validation(val_loader, model, loss_fn, device):
     val_acc = correct / max(1, total)
     return val_loss, val_acc
 
-@hydra.main(config_path="../configs", config_name="train_v11_distilcamembert", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="train_v14_distilcamembert", version_base="1.1")
 def train(cfg):
     set_seed(cfg.seed)
     logger = wandb.init(project="challenge_CSC_43M04_EP", name=cfg.experiment_name) if cfg.log else None

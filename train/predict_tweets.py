@@ -15,7 +15,7 @@ from data import load_dataset, make_loader
 OmegaConf.register_new_resolver("if", lambda cond, a, b: a if cond else b)
 
 
-@hydra.main(config_path="../configs", config_name="train_v11_distilcamembert", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="train_v14_distilcamembert", version_base="1.1")
 def predict(cfg):
     device = (
         torch.device("cuda") if torch.cuda.is_available()
@@ -35,6 +35,12 @@ def predict(cfg):
 
     with map_path.open("r", encoding="utf-8") as f:
         src2idx = json.load(f)
+    stats_path = ckpt_path.with_suffix(".stats.json")
+    if not stats_path.exists():
+        raise FileNotFoundError(f"stats file not found: {stats_path}")
+
+    with stats_path.open("r", encoding="utf-8") as f:
+        stats = json.load(f)
 
     # ---- load and preprocess test data with SAME mapping ----
     test_path = Path(cfg.predict_path)
@@ -42,10 +48,11 @@ def predict(cfg):
         raise FileNotFoundError(f"Test file not found: {test_path}")
 
     # expect_label=False -> we don't need a 'label' column
-    df_test, _ = load_dataset(
+    df_test, _, _ = load_dataset(
         train_path=str(test_path),
         expect_label=False,
-        src2idx=src2idx
+        src2idx=src2idx,
+        stats=stats,
     )
 
     # DataLoader with is_train=False → TweetDataset does NOT expect labels

@@ -36,14 +36,14 @@ model:
     source_emb_dim: 16
     num_proj_dim: 16
     head_hidden_dim: 256
-    head_dropout: 0.15 #Increase?
+    head_dropout: 0.3 #Increase?
     max_len_tweet: 128
     max_len_desc: 96
 
 optim:
   _target_: torch.optim.AdamW
   lr_class: 3e-4   # head + projections
-  lr_lora:  1e-4   # LoRA adapters
+  lr_lora:  4e-5   # LoRA adapters
   lr: 2e-4         # base lr (unused directly; AdamW needs it)
   weight_decay: 0.01 # Decreased from 0.01
 

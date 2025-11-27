@@ -90,15 +90,25 @@ def parse_tweets(path, expect_label=True):
     return out
 
 
-def make_transformations(df, src2idx=None, K=15):
+def make_transformations(df, src2idx=None, K=15, stats=None):
     # --- text fields ---
     df["user.description"] = df["user.description"].fillna("").astype(str)
     df["full_text"] = df["full_text"].fillna("").astype(str)
 
     # --- numeric transforms ---
     # clip heavy tails before log1p
-    p99_listed  = df["user.listed_count"].quantile(0.995)
-    p99_status  = df["user.statuses_count"].quantile(0.995)
+    if stats is None:
+        # fit mode: compute from this df
+        p99_listed = df["user.listed_count"].quantile(0.995)
+        p99_status = df["user.statuses_count"].quantile(0.995)
+        stats = {
+            "p99_listed": float(p99_listed),
+            "p99_status": float(p99_status),
+        }
+    else:
+        # transform mode: reuse precomputed stats
+        p99_listed = stats["p99_listed"]
+        p99_status = stats["p99_status"]
 
     df["log_listed"]  = np.log1p(np.clip(df["user.listed_count"].fillna(0), 0, p99_listed))
     df["log_status"]  = np.log1p(np.clip(df["user.statuses_count"].fillna(0), 0, p99_status))
@@ -114,10 +124,10 @@ def make_transformations(df, src2idx=None, K=15):
         df["source_app"].fillna("Unknown").map(src2idx).fillna(0).astype(int)
     )
 
-    return df, src2idx
+    return df, src2idx, stats
 
 
-def load_dataset(train_path="data/train.jsonl", expect_label=True, src2idx=None, K=15):
+def load_dataset(train_path="data/train.jsonl", expect_label=True, src2idx=None, K=15, stats=None):
     dataset = parse_tweets(train_path, expect_label=expect_label)
-    df, src2idx = make_transformations(dataset, src2idx=src2idx, K=K)
-    return df, src2idx
+    df, src2idx, stats = make_transformations(dataset, src2idx=src2idx, K=K, stats=stats)
+    return df, src2idx, stats
