@@ -15,7 +15,7 @@ from data import load_dataset, make_loader
 OmegaConf.register_new_resolver("if", lambda cond, a, b: a if cond else b)
 
 
-@hydra.main(config_path="../configs", config_name="train_v15_distilcamembert", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="train_v17_distilcamembert", version_base="1.1")
 def predict(cfg):
     device = (
         torch.device("cuda") if torch.cuda.is_available()

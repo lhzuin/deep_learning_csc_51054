@@ -14,10 +14,8 @@ class InfluencerDistilCamembert(nn.Module):
         head_dropout: float = 0.15,
         max_len_tweet: int = 128,
         max_len_desc: int = 96,
-        meta_dropout: float = 0.0,
     ):
         super().__init__()
-        self._param_groups_cache = None
         self.max_len_tweet = max_len_tweet
         self.max_len_desc  = max_len_desc
 
@@ -58,8 +56,6 @@ class InfluencerDistilCamembert(nn.Module):
             nn.ReLU(),
             nn.LayerNorm(num_proj_dim),
         )
-
-        self.meta_dropout = nn.Dropout(meta_dropout)
 
         # ---------- Head ----------
         joint_dim = (bert_dim   # tweet
@@ -121,10 +117,7 @@ class InfluencerDistilCamembert(nn.Module):
         ], dim=1)                                             # [B, 3]
         n_f = self.num_proj(num)
 
-        meta = torch.cat([s_f, n_f], dim=-1)
-        meta = self.meta_dropout(meta) 
-
-        joint = torch.cat([t_f, d_f, meta], dim=-1)       # [B, joint_dim]
+        joint = torch.cat([t_f, d_f, s_f, n_f], dim=-1)       # [B, joint_dim]
         logp = self.head(joint)                               # [B, 2]
         return logp
 
@@ -169,57 +162,5 @@ class InfluencerDistilCamembert(nn.Module):
                       self.tweet_proj, self.desc_proj]:
                 for p in m.parameters():
                     p.requires_grad = True
+
     
-    def _build_param_groups(self):
-        """
-        Build a dict group_name -> list[Parameter].
-        Called once and cached.
-        """
-        groups = {
-            "head":       list(self.head.parameters()),
-            "tweet_proj": list(self.tweet_proj.parameters()),
-            "desc_proj":  list(self.desc_proj.parameters()),
-            "source_emb": list(self.source_emb.parameters()),
-            "num_proj":   list(self.num_proj.parameters()),
-            "text_lora_all": [],
-            "text_lora_tweet": [],
-            "text_lora_desc": [],
-        }
-
-        # LoRA params live inside self.text_enc with names containing 'lora_'
-        for name, p in self.text_enc.named_parameters():
-            if "lora_" not in name:
-                continue
-            groups["text_lora_all"].append(p)
-
-            # If adapter names appear in param names, you can separate:
-            # (You may need to tweak these patterns by printing a few names)
-            if self.tweet_adapter in name:
-                groups["text_lora_tweet"].append(p)
-            if self.desc_adapter in name:
-                groups["text_lora_desc"].append(p)
-
-
-        return groups
-
-    def get_param_groups(self):
-        if self._param_groups_cache is None:
-            self._param_groups_cache = self._build_param_groups()
-        return self._param_groups_cache
-
-    def set_trainable_groups(self, group_names):
-        """
-        Generic, config-driven freezing:
-        - group_names: list of strings, subset of keys in get_param_groups().
-        """
-        groups = self.get_param_groups()
-
-        # default: freeze everything
-        for p in self.parameters():
-            p.requires_grad = False
-
-        # enable only requested groups
-        for g in group_names:
-            assert g in groups, f"Unknown param group: {g}"
-            for p in groups[g]:
-                p.requires_grad = True

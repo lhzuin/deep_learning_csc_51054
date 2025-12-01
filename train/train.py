@@ -4,7 +4,6 @@ import random
 import numpy as np
 from omegaconf import OmegaConf
 from torch.amp import autocast, GradScaler
-from transformers import get_cosine_schedule_with_warmup
 from transformers.optimization import get_scheduler
 from tqdm.auto import tqdm
 
@@ -21,10 +20,10 @@ def set_seed(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def build_scheduler_for_stage(optimizer, *, stage_name, cfg, num_training_steps):
+def build_scheduler_for_stage(optimizer, *, stage_dict, cfg, num_training_steps):
     # stage_name is "stage1" or "stage2"
-    scheduler_type = getattr(cfg, f"lr_scheduler_{stage_name}")
-    warmup_fraction = getattr(cfg, f"warmup_fraction_{stage_name}")
+    scheduler_type = stage_dict["lr_scheduler"]
+    warmup_fraction = stage_dict["warmup_fraction"]
     use_warmup = getattr(cfg, "use_warmup", True)
 
     num_warmup_steps = int(warmup_fraction * num_training_steps) if use_warmup else 0
@@ -36,77 +35,219 @@ def build_scheduler_for_stage(optimizer, *, stage_name, cfg, num_training_steps)
         num_training_steps=num_training_steps,
     )
 
-def param_groups_for(model, lr_class, lr_lora, cfg):
-    lora_params = [p for n,p in model.named_parameters() if p.requires_grad and "lora_" in n]
-    head_params = [p for n,p in model.named_parameters() if p.requires_grad and "lora_" not in n]
-    return [
-        {"params": head_params, "lr": lr_class, "weight_decay": cfg.optim.weight_decay},
-        {"params": lora_params, "lr": lr_lora,  "weight_decay": 0.0},
-    ]
 
-def run_epoch(stage_name, train_loader, model, loss_fn, optimizer, scheduler, scaler, logger, device):
-    model.train()
-    total_loss, total_n = 0.0, 0
+def param_groups_for(model, cfg):
+    groups = model.get_param_groups()
 
-    # tqdm progress bar over the train dataloader
-    progress = tqdm(
-        train_loader,
-        desc=f"{stage_name} | training",
-        leave=False  # set True if you want to keep all bars
-    )
+    # Safely get LR with fallback to lr_class
+    def get_lr(key, default_key="lr_class"):
+        optim_cfg = cfg.optim
+        return getattr(optim_cfg, key, getattr(optim_cfg, default_key))
 
-    for batch in progress:
-        batch["label"] = batch["label"].to(device)
-        optimizer.zero_grad(set_to_none=True)
+    pg = []
 
-        if scaler:
-            with autocast(device_type=device.type):
-                logp = model(batch)
-                loss = loss_fn(logp, batch["label"])
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+    def add_group(group_name, lr_key, wd=True):
+        params = [p for p in groups[group_name] if p.requires_grad]
+        if not params:
+            return
+        lr = get_lr(lr_key)
+        weight_decay = cfg.optim.weight_decay if wd else 0.0
+        pg.append({"params": params, "lr": lr, "weight_decay": weight_decay})
+
+    # Non-LoRA groups
+    add_group("head",       "lr_head")
+    add_group("tweet_proj", "lr_text_proj")
+    add_group("desc_proj",  "lr_text_proj")
+    add_group("source_emb", "lr_source_emb")
+    add_group("num_proj",   "lr_meta_proj")
+
+    # LoRA groups
+    add_group("text_lora_all", "lr_lora", wd=False)
+
+    return pg
+
+
+class Trainer:
+    def __init__(self, cfg, logger, device):
+        self.model = None
+        self.cfg = cfg
+        self.train_loader = None
+        self.val_loader = None
+        self.loss_fn = None
+        self.optimizer = None
+        self.scaler = None
+        self.logger = logger
+        self.device = device
+    
+    def init_datamodule(self):
+        # Data
+        self.datamodule = hydra.utils.instantiate(self.cfg.datamodule)
+        self.datamodule.setup(self.cfg.checkpoint_save_path, type=self.cfg.get("val_type", "random"))
+        self.train_loader = self.datamodule.train_class_dataloader()
+        self.val_loader   = self.datamodule.val_dataloader()
+
+    def init_model(self):
+        self.model = hydra.utils.instantiate(
+            self.cfg.model.instance,
+            n_source_buckets=self.datamodule.n_source_buckets
+        ).to(self.device)
+
+        self.loss_fn = hydra.utils.instantiate(self.cfg.loss_fn)
+
+        self.scaler = GradScaler(device="cuda") if self.device.type == "cuda" else None
+
+        self.patience = self.cfg.early_stopping.patience
+        self.min_epochs = self.cfg.early_stopping.min_epochs
+        self.checkpoint_save_path = self.cfg.checkpoint_save_path
+        self.acc_epsilon = self.cfg.acc_epsilon
+
+        # Full optim config as dict
+        opt_cfg_full = OmegaConf.to_container(self.cfg.optim, resolve=True, enum_to_str=True)
+
+        # Extract target and keep only AdamW-supported args
+        target = opt_cfg_full.pop("_target_")
+
+        allowed_keys = {
+            "lr", "betas", "eps", "weight_decay",
+            "amsgrad", "foreach", "maximize",
+            "capturable", "differentiable", "fused",
+        }
+        opt_kwargs = {k: v for k, v in opt_cfg_full.items() if k in allowed_keys}
+        opt_kwargs["_target_"] = target
+
+        self.opt_cfg = opt_kwargs
+
+        self.optimizer = None
+
+    def run_epoch(self, stage_name, scheduler):
+        self.model.train()
+        total_loss, total_n = 0.0, 0
+
+        # tqdm progress bar over the train dataloader
+        progress = tqdm(
+            self.train_loader,
+            desc=f"{stage_name} | training",
+            leave=False  # set True if you want to keep all bars
+        )
+
+        for batch in progress:
+            batch["label"] = batch["label"].to(self.device)
+            self.optimizer.zero_grad(set_to_none=True)
+
+            if self.scaler:
+                with autocast(device_type=self.device.type):
+                    logp = self.model(batch)
+                    loss = self.loss_fn(logp, batch["label"])
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                logp = self.model(batch)
+                loss = self.loss_fn(logp, batch["label"])
+                loss.backward()
+                self.optimizer.step()
+
+            if scheduler:
+                scheduler.step()
+
+            loss_val = loss.detach().cpu().item()
+            total_loss += loss_val * len(batch["label"])
+            total_n    += len(batch["label"])
+
+            # tqdm: show current loss in the bar
+            progress.set_postfix(loss=f"{loss_val:.4f}")
+
+            if self.logger:
+                wandb.log({
+                    f"{stage_name}/loss_step": loss_val,
+                    "aggregate/loss_step": loss_val,
+                })
+
+        return total_loss / total_n
+
+    def run_validation(self):
+        self.model.eval()
+        val_loss, val_n = 0.0, 0
+        correct, total = 0, 0
+        with torch.no_grad():
+            for batch in self.val_loader:
+                batch["label"] = batch["label"].to(self.device)
+                logp = self.model(batch)
+                loss = self.loss_fn(logp, batch["label"])
+                val_loss += loss.detach().cpu().item() * len(batch["label"])
+                val_n    += len(batch["label"])
+
+                preds = logp.argmax(dim=1)
+                correct += (preds == batch["label"]).sum().item()
+                total   += len(batch["label"])
+        val_loss /= max(1, val_n)
+        val_acc = correct / max(1, total)
+        return val_loss, val_acc
+
+    def run_stage(self, stage_dict):
+        stage_name = stage_dict["name"]
+        print(f"Running stage: {stage_dict['name']}")
+        self.model.set_trainable_groups(stage_dict["groups"])
+        self.optimizer = hydra.utils.instantiate(
+            self.opt_cfg,
+            params=param_groups_for(self.model, self.cfg),
+            _convert_="all",
+        )
+
+        if self.cfg.use_warmup:
+            num_training_steps_stage = stage_dict["epochs"] * len(self.train_loader)
+            scheduler_stage = build_scheduler_for_stage(
+                self.optimizer,
+                stage_dict=stage_dict,
+                cfg=self.cfg,
+                num_training_steps=num_training_steps_stage,
+            )
         else:
-            logp = model(batch)
-            loss = loss_fn(logp, batch["label"])
-            loss.backward()
-            optimizer.step()
+            scheduler_stage = None
 
-        if scheduler:
-            scheduler.step()
+        best_val_loss, best_val_acc, epochs_no_improve = float("inf"), 0, 0
+        for epoch in range(stage_dict["epochs"]):
+            train_loss = self.run_epoch(stage_name, scheduler_stage)
+            if self.logger:
+                wandb.log({
+                    "epoch": epoch,
+                    f"{stage_name}/loss_epoch": train_loss,
+                    "aggregate/loss_epoch": train_loss,
+                })
 
-        loss_val = loss.detach().cpu().item()
-        total_loss += loss_val * len(batch["label"])
-        total_n    += len(batch["label"])
+            val_loss, val_acc = self.run_validation()
 
-        # tqdm: show current loss in the bar
-        progress.set_postfix(loss=f"{loss_val:.4f}")
+            if self.logger:
+                wandb.log({
+                    "epoch": epoch,
+                    f"{stage_name}/val_loss_epoch": val_loss,
+                    f"{stage_name}/val_acc_epoch": val_acc,
+                    "aggregate/val_loss_epoch": val_loss,
+                    "aggregate/val_acc_epoch": val_acc,
+                })
+                
+            improved = (val_acc > best_val_acc) or ((best_val_acc - val_acc < self.acc_epsilon) and (val_loss < best_val_loss))
+            if improved:
+                best_val_loss, best_val_acc, epochs_no_improve = val_loss, val_acc, 0
+                torch.save(self.model.state_dict(), self.checkpoint_save_path)
+                print(f"[{stage_name}][Epoch {epoch}] best val loss {best_val_loss:.4f}, best val acc {best_val_acc:.4f} (saved)")
+            else:
+                print(f"[{stage_name}]No improve in epoch {epoch}: val loss {val_loss:.4f}, val acc {val_acc:.4f}")
+                epochs_no_improve += 1
+                if epochs_no_improve >= self.patience and epoch >= self.min_epochs:
+                    print(f"Early stopping {stage_dict['name']}.")
+                    break
 
-        if logger:
-            wandb.log({f"{stage_name}/loss_step": loss_val})
+    def run_train(self):
+        for i, stage_dict in enumerate(self.cfg.train_stages):
+            # For stages beyond the first, reload best weights from previous stage
+            if i > 0:
+                state_dict = torch.load(self.checkpoint_save_path, map_location=self.device)
+                self.model.load_state_dict(state_dict)
 
-    return total_loss / total_n
+            self.run_stage(stage_dict)
 
-def run_validation(val_loader, model, loss_fn, device):
-    model.eval()
-    val_loss, val_n = 0.0, 0
-    correct, total = 0, 0
-    with torch.no_grad():
-        for batch in val_loader:
-            batch["label"] = batch["label"].to(device)
-            logp = model(batch)
-            loss = loss_fn(logp, batch["label"])
-            val_loss += loss.detach().cpu().item() * len(batch["label"])
-            val_n    += len(batch["label"])
-
-            preds = logp.argmax(dim=1)
-            correct += (preds == batch["label"]).sum().item()
-            total   += len(batch["label"])
-    val_loss /= max(1, val_n)
-    val_acc = correct / max(1, total)
-    return val_loss, val_acc
-
-@hydra.main(config_path="../configs", config_name="train_v15_distilcamembert", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="train_v17_distilcamembert", version_base="1.1")
 def train(cfg):
     set_seed(cfg.seed)
     logger = wandb.init(project="challenge_CSC_43M04_EP", name=cfg.experiment_name) if cfg.log else None
@@ -118,113 +259,26 @@ def train(cfg):
     )
     print(f"PID={os.getpid()}  (kill -SIGUSR1 {os.getpid()} to checkpoint+exit)")
 
-    # Data
-    datamodule = hydra.utils.instantiate(cfg.datamodule)
-    datamodule.setup(cfg.checkpoint_save_path, type=cfg.get("val_type", "random"))
+    
 
-    # Model (override n_source_buckets from data)
-    model = hydra.utils.instantiate(
-        cfg.model.instance,
-        n_source_buckets=datamodule.n_source_buckets
-    ).to(device)
+    trainer = Trainer(
+        cfg=cfg,
+        logger=logger,
+        device=device,
+    )
+    trainer.init_datamodule()
+    trainer.init_model()
+    
 
     # Early stop via signal
     def save_and_exit(*_):
-        torch.save(model.state_dict(), cfg.checkpoint_save_path)
+        torch.save(trainer.model.state_dict(), cfg.checkpoint_save_path)
         print(f"Saved checkpoint → {cfg.checkpoint_save_path}")
         sys.exit(0)
     signal.signal(signal.SIGUSR1, save_and_exit)
 
-    train_loader = datamodule.train_class_dataloader()
-    val_loader   = datamodule.val_dataloader()
-    loss_fn = hydra.utils.instantiate(cfg.loss_fn)
 
-    scaler = GradScaler(device="cuda") if device.type == "cuda" else None
-
-    # ------- Stage 1: MLP-only warmup -------
-    model.set_stage("mlp_only")
-    opt_cfg = OmegaConf.to_container(cfg.optim, resolve=True, enum_to_str=True)
-    lr_class = opt_cfg.pop("lr_class")
-    lr_lora  = opt_cfg.pop("lr_lora")
-    optimizer = hydra.utils.instantiate(opt_cfg, params=param_groups_for(model, lr_class, lr_lora, cfg), _convert_="all")
-
-    if cfg.use_warmup:
-        num_training_steps_stage1 = cfg.epochs_stage1 * len(train_loader)
-        scheduler_stage1 = build_scheduler_for_stage(
-            optimizer,
-            stage_name="stage1",
-            cfg=cfg,
-            num_training_steps=num_training_steps_stage1,
-        )
-    else:
-        scheduler_stage1 = None
-
-    
-
-
-    best_val_loss, best_val_acc, patience, epochs_no_improve = float("inf"), 0, cfg.early_stopping.patience, 0
-    for epoch in range(cfg.epochs_stage1):
-        train_loss = run_epoch("stage1", train_loader, model, loss_fn, optimizer, scheduler_stage1, scaler, logger, device)
-        if logger: wandb.log({"epoch": epoch, "stage1/loss_epoch": train_loss})
-
-        val_loss, val_acc = run_validation(val_loader, model, loss_fn, device)
-        
-        if logger: 
-            wandb.log({"epoch": epoch, "stage1/val_loss_epoch": val_loss})
-            wandb.log({"epoch": epoch, "stage1/val_acc_epoch": val_acc})
-
-        improved = (val_acc > best_val_acc) or ((best_val_acc - val_acc < cfg.acc_epsilon) and (val_loss < best_val_loss))
-        if improved:
-            best_val_loss, best_val_acc, epochs_no_improve = val_loss, val_acc, 0
-            torch.save(model.state_dict(), cfg.checkpoint_save_path)
-            print(f"[Stage1][Epoch {epoch}] best val loss {best_val_loss:.4f}, best val acc {best_val_acc:.4f} (saved)")
-            
-        else:
-            print(f"[Stage1] No improve in epoch {epoch}: val loss {val_loss:.4f}, val acc {val_acc:.4f}")
-            epochs_no_improve += 1
-            if epochs_no_improve >= patience and epoch >= cfg.early_stopping.min_epochs:
-                print("Early stopping Stage 1.")
-                break
-
-    # ------- Stage 2: full (LoRA + all shallow layers) -------
-    state_dict = torch.load(cfg.checkpoint_save_path, map_location=device)
-    model.load_state_dict(state_dict)
-    print("Loaded best Stage1 checkpoint before starting Stage2.")
-    model.set_stage("full")
-    optimizer = hydra.utils.instantiate(opt_cfg, params=param_groups_for(model, lr_class, lr_lora, cfg), _convert_="all")
-    if cfg.use_warmup:
-        num_training_steps_stage2 = cfg.epochs_stage2 * len(train_loader)
-        scheduler_stage2 = build_scheduler_for_stage(
-            optimizer,
-            stage_name="stage2",
-            cfg=cfg,
-            num_training_steps=num_training_steps_stage2,
-        )
-    else:
-        scheduler_stage2 = None
-
-    best_val_loss, best_val_acc, epochs_no_improve = float("inf"), 0, 0
-    for epoch in range(cfg.epochs_stage2):
-        train_loss = run_epoch("stage2", train_loader, model, loss_fn, optimizer, scheduler_stage2, scaler, logger, device)
-        if logger: wandb.log({"epoch": epoch, "stage2/loss_epoch": train_loss})
-
-        val_loss, val_acc = run_validation(val_loader, model, loss_fn, device)
-
-        if logger: 
-            wandb.log({"epoch": epoch, "stage2/val_loss_epoch": val_loss})
-            wandb.log({"epoch": epoch, "stage2/val_acc_epoch": val_acc})
-            
-        improved = (val_acc > best_val_acc) or ((best_val_acc - val_acc < cfg.acc_epsilon) and (val_loss < best_val_loss))
-        if improved:
-            best_val_loss, best_val_acc, epochs_no_improve = val_loss, val_acc, 0
-            torch.save(model.state_dict(), cfg.checkpoint_save_path)
-            print(f"[Stage2][Epoch {epoch}] best val loss {best_val_loss:.4f}, best val acc {best_val_acc:.4f} (saved)")
-        else:
-            print(f"[Stage2]No improve in epoch {epoch}: val loss {val_loss:.4f}, val acc {val_acc:.4f}")
-            epochs_no_improve += 1
-            if epochs_no_improve >= patience and epoch >= cfg.early_stopping.min_epochs:
-                print("Early stopping Stage 2.")
-                break
+    trainer.run_train()
 
     if logger: logger.finish()
 
