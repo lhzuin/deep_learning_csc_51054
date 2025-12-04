@@ -36,35 +36,41 @@ def build_scheduler_for_stage(optimizer, *, stage_dict, cfg, num_training_steps)
         num_training_steps=num_training_steps,
     )
 
-def param_groups_for(model, cfg, stage_dict):
+
+def param_groups_for(model, cfg):
     groups = model.get_param_groups()
 
-    # Expect a dict: {group_name: lr_key}
-    stage_groups = stage_dict.get("groups", {})
-
-    optim_cfg = cfg.optim
-
-    # Safely get LR with fallback to lr / lr_class
-    def get_lr(key, default_key="lr"):
-        if hasattr(optim_cfg, key):
-            return getattr(optim_cfg, key)
-        if hasattr(optim_cfg, default_key):
-            return getattr(optim_cfg, default_key)
-        return getattr(optim_cfg, "lr_class")
+    # Safely get LR with fallback to lr_class
+    def get_lr(key, default_key="lr_class"):
+        optim_cfg = cfg.optim
+        return getattr(optim_cfg, key, getattr(optim_cfg, default_key))
 
     pg = []
-    for group_name, lr_key in stage_groups.items():
+
+    def add_group(group_name, lr_key, wd=True):
         if group_name not in groups:
-            continue
+            return
         params = [p for p in groups[group_name] if p.requires_grad]
         if not params:
-            continue
+            return
         lr = get_lr(lr_key)
-        # Special-case: no weight decay for LoRA-style groups
-        weight_decay = 0.0 if "lora" in group_name else cfg.optim.weight_decay
+        weight_decay = cfg.optim.weight_decay if wd else 0.0
         pg.append({"params": params, "lr": lr, "weight_decay": weight_decay})
-    return pg
 
+    # Non-LoRA groups
+    add_group("head",       "lr_head")
+    add_group("tweet_proj", "lr_text_proj")
+    add_group("desc_proj",  "lr_text_proj")
+    add_group("source_emb", "lr_source_emb")
+    add_group("num_proj",   "lr_meta_proj")
+    add_group("mlp",       "lr_head")
+    add_group("classifier",       "lr_head")
+    add_group("enc_last2",       "lr_enc")
+
+    # LoRA groups
+    add_group("text_lora_all", "lr_lora", wd=False)
+
+    return pg
 
 
 class Trainer:
@@ -208,11 +214,10 @@ class Trainer:
         stage_name = stage_dict["name"]
         print(f"Running stage: {stage_dict['name']}")
         print(">>> Optim cfg :", self.cfg.optim)
-        self.model.set_trainable_groups(list(stage_dict["groups"].keys()))
-
+        self.model.set_trainable_groups(stage_dict["groups"])
         self.optimizer = hydra.utils.instantiate(
             self.opt_cfg,
-            params=param_groups_for(self.model, self.cfg, stage_dict),
+            params=param_groups_for(self.model, self.cfg),
             _convert_="all",
         )
 
@@ -271,7 +276,7 @@ class Trainer:
 
             self.run_stage(stage_dict)
 
-@hydra.main(config_path="../configs", config_name="tweet_only_v11", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="tweet_only_v10", version_base="1.1")
 def train(cfg):
     set_seed(cfg.seed)
     logger = wandb.init(project="challenge_CSC_43M04_EP", name=cfg.experiment_name) if cfg.log else None
