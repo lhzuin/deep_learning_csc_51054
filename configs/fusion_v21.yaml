@@ -1,0 +1,73 @@
+experiment_name: "fusion_v21"
+log: true
+seed: 42
+acc_epsilon: 1e-3
+val_type: "author_based"   # or "random"
+
+train_stages:
+  - name: stage1
+    epochs: 3
+    warmup_fraction: 0.02
+    lr_scheduler: cosine
+    groups: ["head"]     # only fusion head is trainable
+
+use_warmup: true
+
+checkpoint_save_path: "fusion_v21.pt"
+checkpoint_load_path: ${hydra:runtime.cwd}/checkpoints/fusion_v21.pt
+predict_path: ${hydra:runtime.cwd}/../kaggle_test.jsonl
+output_csv: ${hydra:runtime.cwd}/submission.csv
+
+early_stopping:
+  patience: 2
+  min_epochs: 2
+
+datamodule:
+  _target_: data.datamodule_fusion.FusionDataModule
+  train_path: ${hydra:runtime.cwd}/../train.jsonl
+  batch_size: 16
+  num_workers: 2
+  val_size: 0.1
+  random_state: ${seed}
+  meta_ckpt_path: ${hydra:runtime.cwd}/checkpoints/meta_tower_best.pt
+
+model:
+  instance:
+    _target_: models.multitower_fusion.MultiTowerFusion
+
+    meta_ckpt_path: ${hydra:runtime.cwd}/checkpoints/meta_tower_best.pt
+    tweet_ckpt_path: ${hydra:runtime.cwd}/checkpoints/tweet_only_lora.pt
+    desc_ckpt_path: ${hydra:runtime.cwd}/checkpoints/desc_only_lora.pt
+
+    # Must match how you trained the towers:
+    meta_in_dim: 7          # best_with_seven length
+    meta_hidden_dim: 32
+    meta_out_dim: 16
+    meta_dropout: 0.0
+
+    tweet_base_model: "cmarkea/distilcamembert-base"
+    tweet_head_hidden_dim: 128
+    tweet_head_dropout: 0.1
+    tweet_max_len: 128
+    tweet_has_lora: true
+
+    desc_base_model: "cmarkea/distilcamembert-base"
+    desc_head_hidden_dim: 128
+    desc_head_dropout: 0.1
+    desc_max_len: 128
+    desc_has_lora: true
+
+    fusion_hidden_dim: 128
+    fusion_dropout: 0.1
+    freeze_towers: true
+
+optim:
+  _target_: torch.optim.AdamW
+  lr_class: 5e-4      # used for group "head" (= fusion_head)
+  lr_head: 2e-4 
+  lr_lora:  1.6e-4    # not used here, but harmless
+  lr: 2e-4            # base lr (unused directly)
+  weight_decay: 0.01
+
+loss_fn:
+  _target_: torch.nn.NLLLoss

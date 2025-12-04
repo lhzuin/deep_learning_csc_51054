@@ -144,3 +144,32 @@ def load_dataset(train_path="data/train.jsonl", expect_label=True, src2idx=None,
     dataset = parse_tweets(train_path, expect_label=expect_label)
     df, src2idx, stats = make_transformations(dataset, src2idx=src2idx, K=K, stats=stats)
     return df, src2idx, stats
+
+# ---- New: description-only dataset ---------------------------------
+def load_desc_dataset(
+    train_path="data/train.jsonl",
+    expect_label=True,
+    dedupe_by_desc=True,
+):
+    """
+    Load a minimal dataset with:
+      - author_pseudo_id
+      - user.description
+      - label (if present)
+    Optionally deduplicate by description (random split only).
+    """
+    # reuse your existing parse_tweets (so author_pseudo_id is already there)
+    df = parse_tweets(train_path, expect_label=expect_label)
+
+    cols = ["author_pseudo_id", "user.description"]
+    if expect_label and "label" in df.columns:
+        cols.append("label")
+
+    out = df[cols].copy()
+    out["user.description"] = out["user.description"].fillna("").astype(str)
+
+    if dedupe_by_desc:
+        # one example per unique description
+        out = out.drop_duplicates(subset=["user.description"]).reset_index(drop=True)
+
+    return out

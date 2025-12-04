@@ -15,7 +15,7 @@ from data import load_dataset, make_loader
 OmegaConf.register_new_resolver("if", lambda cond, a, b: a if cond else b)
 
 
-@hydra.main(config_path="../configs", config_name="train_v17_distilcamembert", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="fusion_v21", version_base="1.1")
 def predict(cfg):
     device = (
         torch.device("cuda") if torch.cuda.is_available()
@@ -61,10 +61,15 @@ def predict(cfg):
 
     # ---- instantiate model with correct n_source_buckets ----
     n_source_buckets = 1 + len(src2idx.values())
-    model = hydra.utils.instantiate(
-        cfg.model.instance,
-        n_source_buckets=n_source_buckets
-    ).to(device)
+    try:
+        model = hydra.utils.instantiate(
+            cfg.model.instance,
+            n_source_buckets=n_source_buckets
+        ).to(device)
+    except Exception:
+        model = hydra.utils.instantiate(
+            cfg.model.instance
+        ).to(device)
 
     # load trained weights
     state_dict = torch.load(ckpt_path, map_location=device)

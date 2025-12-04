@@ -6,6 +6,7 @@ from omegaconf import OmegaConf
 from torch.amp import autocast, GradScaler
 from transformers.optimization import get_scheduler
 from tqdm.auto import tqdm
+from sklearn.metrics import roc_auc_score
 
 
 OmegaConf.register_new_resolver("if", lambda cond, a, b: a if cond else b)
@@ -47,6 +48,8 @@ def param_groups_for(model, cfg):
     pg = []
 
     def add_group(group_name, lr_key, wd=True):
+        if group_name not in groups:
+            return
         params = [p for p in groups[group_name] if p.requires_grad]
         if not params:
             return
@@ -60,6 +63,9 @@ def param_groups_for(model, cfg):
     add_group("desc_proj",  "lr_text_proj")
     add_group("source_emb", "lr_source_emb")
     add_group("num_proj",   "lr_meta_proj")
+    add_group("mlp",       "lr_head")
+    add_group("classifier",       "lr_head")
+    add_group("enc_last2",       "lr_enc")
 
     # LoRA groups
     add_group("text_lora_all", "lr_lora", wd=False)
@@ -87,10 +93,15 @@ class Trainer:
         self.val_loader   = self.datamodule.val_dataloader()
 
     def init_model(self):
-        self.model = hydra.utils.instantiate(
-            self.cfg.model.instance,
-            n_source_buckets=self.datamodule.n_source_buckets
-        ).to(self.device)
+        try:
+            self.model = hydra.utils.instantiate(
+                self.cfg.model.instance,
+                n_source_buckets=self.datamodule.n_source_buckets
+            ).to(self.device)
+        except Exception:
+            self.model = hydra.utils.instantiate(
+                self.cfg.model.instance
+            ).to(self.device)
 
         self.loss_fn = hydra.utils.instantiate(self.cfg.loss_fn)
 
@@ -169,6 +180,8 @@ class Trainer:
         self.model.eval()
         val_loss, val_n = 0.0, 0
         correct, total = 0, 0
+        all_labels = []
+        all_probs  = []
         with torch.no_grad():
             for batch in self.val_loader:
                 batch["label"] = batch["label"].to(self.device)
@@ -180,13 +193,27 @@ class Trainer:
                 preds = logp.argmax(dim=1)
                 correct += (preds == batch["label"]).sum().item()
                 total   += len(batch["label"])
+
+                probs = torch.softmax(logp, dim=1)[:, 1]
+
+                all_labels.append(batch["label"].detach().cpu())
+                all_probs.append(probs.detach().cpu())
         val_loss /= max(1, val_n)
         val_acc = correct / max(1, total)
-        return val_loss, val_acc
+
+        all_labels = torch.cat(all_labels).numpy()
+        all_probs  = torch.cat(all_probs).numpy()
+        try:
+            val_auc = roc_auc_score(all_labels, all_probs)
+        except ValueError:
+            # e.g. if only one class present in val
+            val_auc = float("nan")
+        return val_loss, val_acc, val_auc
 
     def run_stage(self, stage_dict):
         stage_name = stage_dict["name"]
         print(f"Running stage: {stage_dict['name']}")
+        print(">>> Optim cfg :", self.cfg.optim)
         self.model.set_trainable_groups(stage_dict["groups"])
         self.optimizer = hydra.utils.instantiate(
             self.opt_cfg,
@@ -215,17 +242,19 @@ class Trainer:
                     "aggregate/loss_epoch": train_loss,
                 })
 
-            val_loss, val_acc = self.run_validation()
+            val_loss, val_acc, val_auc = self.run_validation()
 
             if self.logger:
                 wandb.log({
                     "epoch": epoch,
                     f"{stage_name}/val_loss_epoch": val_loss,
                     f"{stage_name}/val_acc_epoch": val_acc,
+                    f"{stage_name}/val_auc_epoch": val_auc,
                     "aggregate/val_loss_epoch": val_loss,
                     "aggregate/val_acc_epoch": val_acc,
+                    "aggregate/val_auc_epoch": val_auc,
                 })
-                
+            print("Current AUC:", val_auc)
             improved = (val_acc > best_val_acc) or ((best_val_acc - val_acc < self.acc_epsilon) and (val_loss < best_val_loss))
             if improved:
                 best_val_loss, best_val_acc, epochs_no_improve = val_loss, val_acc, 0
@@ -247,7 +276,7 @@ class Trainer:
 
             self.run_stage(stage_dict)
 
-@hydra.main(config_path="../configs", config_name="train_v17_distilcamembert", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="tweet_only_v10", version_base="1.1")
 def train(cfg):
     set_seed(cfg.seed)
     logger = wandb.init(project="challenge_CSC_43M04_EP", name=cfg.experiment_name) if cfg.log else None

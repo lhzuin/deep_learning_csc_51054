@@ -1,0 +1,58 @@
+experiment_name: "desc_only_v2" # worse than v1
+log: true
+seed: 42
+acc_epsilon: 1e-3
+val_type: "random"
+
+
+train_stages:
+  - name: stage1
+    epochs: 2
+    warmup_fraction: 0.02
+    lr_scheduler: constant_with_warmup
+    groups: ["mlp", "classifier"]
+
+  - name: stage2
+    epochs: 3
+    warmup_fraction: 0.02
+    lr_scheduler: cosine
+    groups: ["mlp", "classifier", "text_lora_all"]
+
+
+use_warmup: true        
+
+checkpoint_save_path: "desc_only_lora.pt"
+checkpoint_load_path: ${hydra:runtime.cwd}/checkpoints/desc_only_lora.pt # "/Users/luiszuin/Desktop/Polytechnique/3AP1/DeepLearning/Kaggle2025/checkpoints/influencer_lora.pt"
+predict_path: ${hydra:runtime.cwd}/../kaggle_test.jsonl
+output_csv: ${hydra:runtime.cwd}/submission.csv
+
+early_stopping:
+  patience: 2
+  min_epochs: 2
+
+datamodule:
+  _target_: data.datamodule_tweets.DescriptionsDataModule
+  train_path: ${hydra:runtime.cwd}/../train.jsonl
+  batch_size: 16
+  num_workers: 2
+  val_size: 0.1
+  random_state: ${seed}
+
+model:
+  instance:
+    _target_: models.description_tower.DescriptionTower
+    head_hidden_dim: 128
+    head_dropout: 0.1
+    max_len: 128
+    has_lora: true
+    base_model: cmarkea/distilcamembert-base
+
+optim:
+  _target_: torch.optim.AdamW
+  lr_class: 5e-4   # head + projections
+  lr_lora:  8e-5   # LoRA adapters
+  lr: 2e-4         # base lr (unused directly; AdamW needs it)
+  weight_decay: 0.01 # Decreased from 0.01
+
+loss_fn:
+  _target_: torch.nn.NLLLoss
