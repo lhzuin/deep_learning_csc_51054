@@ -8,10 +8,7 @@ from transformers.optimization import get_scheduler
 from tqdm.auto import tqdm
 from sklearn.metrics import roc_auc_score
 from torch.utils.data import Dataset, DataLoader
-from sklearn.metrics import accuracy_score
 
-os.environ["HYDRA_FULL_ERROR"] = "1"
-os.environ["TOKENIZERS_PARALLELISM"] = "1"
 
 OmegaConf.register_new_resolver("if", lambda cond, a, b: a if cond else b)
 
@@ -82,9 +79,6 @@ class Trainer:
         self.scaler = None
         self.logger = logger
         self.device = device
-
-        self._raw_train_loader = None
-        self._raw_val_loader = None
     
     def init_datamodule(self):
         # Data
@@ -209,19 +203,7 @@ class Trainer:
         except ValueError:
             # e.g. if only one class present in val
             val_auc = float("nan")
-
-        best_t = 0.5
-        best_acc = 0.0
-        for t in np.linspace(0.0, 1.0, 101):
-            preds_t = (all_probs >= t).astype(int)
-            acc_t = accuracy_score(all_labels, preds_t)
-            if acc_t > best_acc:
-                best_acc = acc_t
-                best_t = t
-
-        print(f"[VAL] default-threshold acc = {val_acc:.4f}, "
-            f"best-threshold acc = {best_acc:.4f} @ t={best_t:.3f}")
-        return val_loss, best_acc, val_auc
+        return val_loss, val_acc, val_auc
 
     def run_stage(self, stage_dict):
         stage_name = stage_dict["name"]
@@ -235,31 +217,6 @@ class Trainer:
             _convert_="all",
         )
 
-        # Optional caching route: stage-dependent
-        use_cache = stage_dict.get(
-            "cache_tower_outputs",
-            getattr(self.cfg, "cache_tower_outputs", False)
-        )
-        only_head = set(stage_dict["groups"].keys()) == {"head"}
-
-        # If we cached in a previous stage and this stage trains towers, restore loaders
-        if not only_head and self._raw_train_loader is not None:
-            print("Restoring original loaders for tower fine-tuning.")
-            self.train_loader = self._raw_train_loader
-            self.val_loader   = self._raw_val_loader
-
-        if use_cache and only_head:
-            print("Caching tower outputs once for this stage...")
-            # Save raw loaders if not saved yet
-            if self._raw_train_loader is None:
-                self._raw_train_loader = self.train_loader
-            if self._raw_val_loader is None:
-                self._raw_val_loader = self.val_loader
-            self._build_cached_train_loader()
-            self._build_cached_val_loader()
-        elif use_cache and not only_head:
-            print("cache_tower_outputs=True, but non-head groups are trainable -> skipping caching")
-            
         if self.cfg.use_warmup:
             num_training_steps_stage = stage_dict["epochs"] * len(self.train_loader)
             scheduler_stage = build_scheduler_for_stage(
@@ -374,64 +331,7 @@ class Trainer:
         # go back to train mode for later
         self.model.train()
 
-    def _build_cached_val_loader(self):
-        """
-        Same idea as _build_cached_train_loader but for the validation set.
-        We cache fused features once and replace self.val_loader by a lightweight
-        loader that only feeds 'fused' + 'label'.
-        """
-        self.model.eval()
-        device = self.device
-
-        fused_list = []
-        labels_list = []
-
-        with torch.no_grad():
-            progress = tqdm(self.val_loader, desc="Caching tower outputs (val)", leave=False)
-            for batch in progress:
-                labels = batch["label"].to(device)
-                out = self.model(batch, return_parts=True)
-
-                # concat tower features: h_meta, h_tweet, h_desc
-                h_meta  = out["h_meta"]
-                h_tweet = out["h_tweet"]
-                h_desc  = out["h_desc"]
-                fused = torch.cat([h_meta, h_tweet, h_desc], dim=1)  # (B, fusion_in_dim)
-
-                fused_list.append(fused.cpu())
-                labels_list.append(labels.cpu())
-
-        fused_all = torch.cat(fused_list, dim=0)   # (N, fusion_in_dim)
-        labels_all = torch.cat(labels_list, dim=0) # (N,)
-
-        class FusedDataset(Dataset):
-            def __init__(self, fused, labels):
-                self.fused = fused
-                self.labels = labels
-            def __len__(self):
-                return self.fused.size(0)
-            def __getitem__(self, idx):
-                return {
-                    "fused": self.fused[idx],
-                    "label": self.labels[idx],
-                }
-
-        fused_dataset = FusedDataset(fused_all, labels_all)
-
-        batch_size = getattr(self.datamodule, "batch_size", 32)
-        num_workers = getattr(self.datamodule, "num_workers", 0)
-
-        self.val_loader = DataLoader(
-            fused_dataset,
-            batch_size=batch_size,
-            shuffle=False,   # no need to shuffle val
-            num_workers=num_workers,
-        )
-
-        # go back to train mode for later
-        self.model.train()
-
-@hydra.main(config_path="../configs", config_name="train_v23", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="tweet_only_v14", version_base="1.1")
 def train(cfg):
     set_seed(cfg.seed)
     logger = wandb.init(project="challenge_CSC_43M04_EP", name=cfg.experiment_name) if cfg.log else None

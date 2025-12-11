@@ -1,23 +1,39 @@
-experiment_name: "fusion_v21"
+version: v22
+experiment_name: fusion_${version}
 log: true
 seed: 42
 acc_epsilon: 1e-3
 val_type: "author_based"
+cache_tower_outputs: false
+acc_threshold: 0.41
 
 train_stages:
   - name: stage1
-    epochs: 3
-    warmup_fraction: 0.02
+    epochs: 4
+    warmup_fraction: 0.02 #0.00
     lr_scheduler: cosine
+    cache_tower_outputs: true
     groups:
       head: lr_head
 
+  - name: stage2
+    epochs: 2
+    warmup_fraction: 0.02
+    lr_scheduler: cosine
+    groups:
+      head: lr_head_final
+      tweet_text_lora_all: lr_lora_final
+      desc_text_lora_all: lr_lora_final
+      tweet_enc_last2: lr_enc_final
+      desc_enc_last2: lr_enc_final
+      #meta: lr_meta
+
 use_warmup: true
 
-checkpoint_save_path: "fusion_v21.pt"
-checkpoint_load_path: ${hydra:runtime.cwd}/checkpoints/fusion_v21.pt
+checkpoint_save_path: fusion_${version}.pt
+checkpoint_load_path: ${hydra:runtime.cwd}/checkpoints/fusion_${version}.pt
 predict_path: ${hydra:runtime.cwd}/../kaggle_test.jsonl
-output_csv: ${hydra:runtime.cwd}/submission.csv
+output_csv: ${hydra:runtime.cwd}/submission_${version}.csv
 
 early_stopping:
   patience: 2
@@ -34,7 +50,7 @@ datamodule:
 
 model:
   instance:
-    _target_: models.multitower_fusion.MultiTowerFusion
+    _target_: models.multitower_fusion_v2.MultiTowerFusionV2
 
     meta_ckpt_path: ${hydra:runtime.cwd}/checkpoints/meta_tower_best.pt
     tweet_ckpt_path: ${hydra:runtime.cwd}/checkpoints/tweet_only_lora.pt
@@ -46,26 +62,30 @@ model:
     meta_out_dim: 16
     meta_dropout: 0.0
 
-    tweet_base_model: "cmarkea/distilcamembert-base"
+    tweet_base_model: "almanach/camembertv2-base"
     tweet_head_hidden_dim: 128
     tweet_head_dropout: 0.1
     tweet_max_len: 128
     tweet_has_lora: true
 
-    desc_base_model: "cmarkea/distilcamembert-base"
+    desc_base_model: "almanach/camembertv2-base"
     desc_head_hidden_dim: 128
     desc_head_dropout: 0.1
     desc_max_len: 128
     desc_has_lora: true
 
-    fusion_hidden_dim: 128
+    fusion_hidden_dim: 512
     fusion_dropout: 0.1
     freeze_towers: true
 
 optim:
   _target_: torch.optim.AdamW
-  lr_head: 2e-4 #lr_class: 5e-4
+  lr_head: 1e-3 
+  lr_head_final: 2e-4 # Avoid losses from the phase 1
+  lr_lora_final: 2e-5 #~10 times less than during text towers training
+  lr_enc_final: 1e-6 #~10 times less than during text towers training
   lr: 2e-4            # base lr (unused directly)
+  lr_meta: 1e-5  #~3x times less than during metadata tower training
   weight_decay: 0.01
 
 loss_fn:

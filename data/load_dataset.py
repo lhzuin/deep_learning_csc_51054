@@ -4,6 +4,7 @@ import re, ast, json
 from pathlib import Path
 import hashlib
 
+
 def parse_tweets(path, expect_label=True):
     # Load & flatten
     path = Path(path)  # <- ensure it's a Path object
@@ -141,8 +142,15 @@ def make_transformations(df, src2idx=None, K=15, stats=None):
 
 
 def load_dataset(train_path="data/train.jsonl", expect_label=True, src2idx=None, K=15, stats=None):
-    dataset = parse_tweets(train_path, expect_label=expect_label)
-    df, src2idx, stats = make_transformations(dataset, src2idx=src2idx, K=K, stats=stats)
+    df = parse_tweets(train_path, expect_label=expect_label)
+    from data import build_meta_features
+    df, stats, src2idx = build_meta_features(
+        df,
+        fit_stats=stats,
+        src2idx=src2idx,
+        K=K
+    )
+    #df, src2idx, stats = make_transformations(dataset, src2idx=src2idx, K=K, stats=stats)
     return df, src2idx, stats
 
 # ---- New: description-only dataset ---------------------------------

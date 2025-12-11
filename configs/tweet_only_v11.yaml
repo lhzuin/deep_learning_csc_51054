@@ -1,4 +1,4 @@
-experiment_name: "tweet_only_v11" 
+experiment_name: "tweet_only_v11" #better than all predecessors
 log: true
 seed: 42
 acc_epsilon: 1e-3

@@ -1,0 +1,105 @@
+version: v23
+experiment_name: train_${version}
+log: true
+seed: 42
+acc_epsilon: 1e-3
+val_type: "author_based"
+cache_tower_outputs: false
+acc_threshold: 0.41
+
+
+train_stages:
+  # ---------------------------------------------------------
+  # Stage 1: everything EXCEPT LoRA + encoder backbones
+  # ---------------------------------------------------------
+  - name: stage1_no_lora_no_enc
+    epochs: 3
+    warmup_fraction: 0.02
+    lr_scheduler: constant_with_warmup
+    groups:
+      head:       lr_head          # main classifier head
+      tweet_proj: lr_text_proj
+      desc_proj:  lr_text_proj
+      source_emb: lr_meta_proj         # source embedding
+      num_proj:   lr_meta_proj          # metadata MLP
+
+  # ---------------------------------------------------------
+  # Stage 2: activate LoRA (backbones still frozen)
+  # ---------------------------------------------------------
+  - name: stage2_lora
+    epochs: 2
+    warmup_fraction: 0.02
+    lr_scheduler: constant_with_warmup
+    groups:
+      head:       lr_head_stage2
+      tweet_proj: lr_text_proj_stage2
+      desc_proj:  lr_text_proj_stage2
+      source_emb: lr_meta_proj_stage2
+      num_proj:   lr_meta_proj_stage2
+      text_lora_tweet: lr_lora     # LoRA on tweet encoder
+      text_lora_desc:  lr_lora     # LoRA on desc encoder
+
+  # ---------------------------------------------------------
+  # Stage 3: LoRA + last two encoder layers
+  # ---------------------------------------------------------
+  - name: stage3_lora_plus_last2
+    epochs: 2   # adjust if you want 3+ here
+    warmup_fraction: 0.02
+    lr_scheduler: cosine
+    groups:
+      head:       lr_head_stage2
+      tweet_proj: lr_text_proj_stage2
+      desc_proj:  lr_text_proj_stage2
+      source_emb: lr_meta_proj_stage2
+      num_proj:   lr_meta_proj_stage2
+      text_lora_tweet: lr_lora
+      text_lora_desc:  lr_lora
+      enc_tweet_last2: lr_enc      # last 2 layers of tweet encoder
+      enc_desc_last2:  lr_enc      # last 2 layers of desc encoder
+
+use_warmup: true        
+
+checkpoint_save_path: "influencer_lora.pt"
+checkpoint_load_path: ${hydra:runtime.cwd}/checkpoints/influencer_${version}.pt # "/Users/luiszuin/Desktop/Polytechnique/3AP1/DeepLearning/Kaggle2025/checkpoints/influencer_lora.pt"
+predict_path: ${hydra:runtime.cwd}/../kaggle_test.jsonl
+output_csv: ${hydra:runtime.cwd}/submission_${version}.csv
+
+early_stopping:
+  patience: 2
+  min_epochs: 2
+
+datamodule:
+  _target_: data.datamodule_tweets.TweetsDataModule
+  train_path: ${hydra:runtime.cwd}/../train.jsonl
+  batch_size: 16 # maybe reduce?
+  num_workers: 2
+  val_size: 0.1
+  random_state: ${seed}
+
+model:
+  instance:
+    _target_: models.influencer_camembert2_v2.InfluencerCamembertV2
+    n_source_buckets: 999   # placeholder; we’ll override at runtime
+    source_emb_dim: 16
+    num_proj_dim: 32
+    head_hidden_dim: 256
+    head_dropout: 0.15 #Increase?
+    max_len_tweet: 128
+    max_len_desc: 96
+    meta_dropout: 0.1
+
+optim:
+  _target_: torch.optim.AdamW
+  lr_head: 3e-4   # head
+  lr_head_stage2: 1e-4
+  lr_lora:  2e-4   # LoRA adapters
+  lr_text_proj: 5e-4 
+  lr_meta_proj: 1e-4
+  lr_meta_proj_stage2: 5e-5
+  lr_text_proj_stage2: 2e-4
+  lr_enc: 7e-6
+  lr: 2e-4         # base lr (unused directly; AdamW needs it)
+  weight_decay: 0.01 # Decreased from 0.01
+
+loss_fn:
+  _target_: torch.nn.NLLLoss

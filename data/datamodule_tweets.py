@@ -2,7 +2,7 @@
 import hydra
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
-from data import load_dataset, make_loader, load_desc_dataset
+from data import load_dataset, make_loader, load_desc_dataset, load_desc_dataset
 from sklearn.model_selection import train_test_split
 import numpy as np
 
@@ -100,7 +100,6 @@ class TweetsDataModule:
         return make_loader(self.val_df, bs=self.batch_size, shuffle=False, is_train=True)
     
 
-from data import load_desc_dataset  # import from where you just defined it
 
 
 # --------------------- Dataset -----------------------------

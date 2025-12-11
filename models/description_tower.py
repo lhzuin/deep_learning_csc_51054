@@ -81,6 +81,7 @@ class DescriptionTower(nn.Module):
             # 1) collect all LoRA params as before
             if "lora_" in name:
                 groups["text_lora_all"].append(p)
+                continue
 
             # 2) collect params that belong to the last 2 layers
             # Works for names like "...layer.4....", "...layer.5...."

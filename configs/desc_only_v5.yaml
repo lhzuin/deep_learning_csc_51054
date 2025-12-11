@@ -1,4 +1,4 @@
-experiment_name: "desc_only_v3" 
+experiment_name: "desc_only_v5" 
 log: true
 seed: 42
 acc_epsilon: 1e-3
@@ -15,7 +15,7 @@ train_stages:
       classifier: lr_head
 
   - name: stage2
-    epochs: 2
+    epochs: 3
     warmup_fraction: 0.02
     lr_scheduler: cosine
     groups:
@@ -64,7 +64,7 @@ optim:
   lr_class: 5e-4   # head + projections
   lr_lora:  16e-5   # LoRA adapters
   lr_head: 5e-4   # head + projections
-  lr_enc: 5e-6
+  lr_enc: 10e-6
   lr: 2e-4         # base lr (unused directly; AdamW needs it)
   weight_decay: 0.01 # Decreased from 0.01
 loss_fn:

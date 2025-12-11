@@ -16,7 +16,7 @@ from data.meta_utils import parse_tweets_meta, build_meta_features
 OmegaConf.register_new_resolver("if", lambda cond, a, b: a if cond else b)
 
 
-@hydra.main(config_path="../configs", config_name="fusion_v21", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="fusion_v22", version_base="1.1")
 def predict(cfg):
     # ----------------- device -----------------
     device = (
@@ -25,6 +25,9 @@ def predict(cfg):
         else torch.device("cpu")
     )
     print(f"Using device: {device}")
+
+    acc_threshold = float(getattr(cfg, "acc_threshold", 0.5))
+    print(f"Using decision threshold: {acc_threshold}")
 
     # ----------------- fusion checkpoint -----------------
     ckpt_path = Path(cfg.checkpoint_load_path)
@@ -105,15 +108,13 @@ def predict(cfg):
 
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Predicting"):
-            # batch has: full_text (list[str]), user_desc (list[str]),
-            #            meta (FloatTensor), label (dummy LongTensor)
-
-            # move only tensors to device
             batch["meta"] = batch["meta"].to(device)
-            # we ignore batch["label"] (dummy)
+            logp = model(batch)  # (B, 2) log-probs or logits
 
-            logp = model(batch)             # (B, 2) log-probs
-            preds = logp.argmax(dim=1)      # (B,) in {0,1}
+            probs = torch.softmax(logp, dim=1)[:, 1]  # (B,)
+
+            preds = (probs >= acc_threshold).long()   # (B,) in {0,1}
+
             all_preds.append(preds.cpu())
 
     if len(all_preds) == 0:
